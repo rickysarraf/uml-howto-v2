@@ -1,0 +1,133 @@
+name: Weekly Upstream Sync Check
+
+# Runs every Monday at 09:00 UTC, and can also be triggered manually.
+# Before using this workflow, set a repository variable called UPSTREAM_REPO_URL
+# (Settings → Secrets and variables → Actions → Variables) with the URL of the
+# upstream repository you want to track, e.g.:
+#   https://github.com/upstream-owner/upstream-repo.git
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate upstream URL variable
+        env:
+          UPSTREAM_REPO_URL: ${{ vars.UPSTREAM_REPO_URL }}
+        run: |
+          if [ -z "$UPSTREAM_REPO_URL" ]; then
+            echo "::error::UPSTREAM_REPO_URL repository variable is not set."
+            echo "Please add it under Settings → Secrets and variables → Actions → Variables."
+            exit 1
+          fi
+
+      - name: Add upstream remote and fetch
+        env:
+          UPSTREAM_REPO_URL: ${{ vars.UPSTREAM_REPO_URL }}
+        run: |
+          git remote add upstream "$UPSTREAM_REPO_URL"
+          git fetch upstream
+
+      - name: Determine upstream default branch
+        id: upstream-branch
+        run: |
+          BRANCH=$(git remote show upstream | grep "HEAD branch" | awk '{print $NF}')
+          echo "Upstream default branch: $BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Check for new upstream commits
+        id: check-diff
+        run: |
+          UPSTREAM_BRANCH="upstream/${{ steps.upstream-branch.outputs.branch }}"
+
+          # Count commits in upstream that are not in the current branch
+          NEW_COMMITS=$(git rev-list HEAD.."$UPSTREAM_BRANCH" --count)
+          echo "New upstream commits: $NEW_COMMITS"
+
+          if [ "$NEW_COMMITS" -gt 0 ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            # Capture the list of changed files for the PR body (capped at 50)
+            ALL_FILES=$(git diff HEAD "$UPSTREAM_BRANCH" --name-only)
+            TOTAL_FILES=$(echo "$ALL_FILES" | wc -l)
+            CHANGED_FILES=$(echo "$ALL_FILES" | head -50)
+            if [ "$TOTAL_FILES" -gt 50 ]; then
+              REMAINING=$(( TOTAL_FILES - 50 ))
+              CHANGED_FILES="$CHANGED_FILES
+... and $REMAINING more file(s)"
+            fi
+            echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No new upstream commits found. Nothing to do."
+          fi
+
+      - name: Create sync branch
+        if: steps.check-diff.outputs.has_changes == 'true'
+        id: create-branch
+        run: |
+          SYNC_BRANCH="sync/upstream-$(date +%Y%m%d)"
+          git checkout -b "$SYNC_BRANCH"
+          echo "sync_branch=$SYNC_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream changes
+        if: steps.check-diff.outputs.has_changes == 'true'
+        run: |
+          UPSTREAM_BRANCH="upstream/${{ steps.upstream-branch.outputs.branch }}"
+          git merge "$UPSTREAM_BRANCH" --no-edit
+
+      - name: Push sync branch
+        if: steps.check-diff.outputs.has_changes == 'true'
+        run: git push origin "${{ steps.create-branch.outputs.sync_branch }}"
+
+      - name: Create Pull Request
+        if: steps.check-diff.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_URL="${{ vars.UPSTREAM_REPO_URL }}"
+          UPSTREAM_BRANCH="${{ steps.upstream-branch.outputs.branch }}"
+          UPSTREAM_COMMIT=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
+          SYNC_BRANCH="${{ steps.create-branch.outputs.sync_branch }}"
+          CHANGED_FILES="${{ steps.check-diff.outputs.changed_files }}"
+          TODAY=$(date -u +%Y-%m-%d)
+
+          gh pr create \
+            --title "chore: sync upstream changes ($TODAY)" \
+            --body "## Upstream Sync
+
+          This PR was automatically created by the weekly upstream sync workflow.
+
+          | | |
+          |---|---|
+          | **Upstream repository** | \`$UPSTREAM_URL\` |
+          | **Upstream branch** | \`$UPSTREAM_BRANCH\` |
+          | **Upstream commit** | \`$UPSTREAM_COMMIT\` |
+          | **Sync date** | $TODAY |
+
+          ### Changed files
+          \`\`\`
+          $CHANGED_FILES
+          \`\`\`
+
+          Please review the changes before merging." \
+            --base main \
+            --head "$SYNC_BRANCH"
