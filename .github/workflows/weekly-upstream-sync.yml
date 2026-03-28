@@ -1,13 +1,13 @@
-name: Weekly Upstream Sync Check
+name: Monthly Upstream Sync Check
 
-# Runs every Monday at 09:00 UTC, and can also be triggered manually.
+# Runs on the 1st of every month at 09:00 UTC, and can also be triggered manually.
 # Before using this workflow, set a repository variable called UPSTREAM_REPO_URL
 # (Settings → Secrets and variables → Actions → Variables) with the URL of the
 # upstream repository you want to track, e.g.:
 #   https://github.com/upstream-owner/upstream-repo.git
 on:
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 9 1 * *'
   workflow_dispatch:
 
 jobs:
